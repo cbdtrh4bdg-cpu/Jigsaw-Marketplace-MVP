@@ -1,0 +1,355 @@
+// Puzzle (and future board/card game) rental marketplace.
+// Catalog is category-generic; everything else is category-agnostic.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  MEMBER
+  ADMIN
+}
+
+enum Category {
+  JIGSAW_PUZZLE
+  BOARD_GAME
+  CARD_GAME
+}
+
+enum CopySource {
+  USER
+  WAREHOUSE
+}
+
+enum CopyStatus {
+  AVAILABLE
+  UNLISTED
+  ON_LOAN
+  RETIRED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+}
+
+enum RentalStatus {
+  REQUESTED
+  APPROVED
+  DECLINED
+  CANCELED
+  SHIPPED_TO_BORROWER
+  IN_HAND
+  RETURN_SHIPPED
+  RETURNED
+  COMPLETED
+  DISPUTED
+}
+
+enum DepositStatus {
+  HELD
+  REFUNDED
+  PARTIALLY_FORFEITED
+  FORFEITED
+}
+
+enum ShipmentDirection {
+  OUTBOUND
+  RETURN
+}
+
+enum ShipmentStatus {
+  LABEL_CREATED
+  IN_TRANSIT
+  DELIVERED
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED
+}
+
+enum PaymentType {
+  SUBSCRIPTION_CHARGE
+  RENTAL_FEE
+  DEPOSIT_HOLD
+  DEPOSIT_REFUND
+  DEPOSIT_FORFEIT
+  OWNER_PAYOUT
+  PLATFORM_FEE
+  SHIPPING_CHARGE
+  LATE_FEE
+}
+
+// ---------------------------------------------------------------------------
+// Core
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(MEMBER)
+  address      Json? // { line1, city, region, postalCode, country }
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  inventoryItems    InventoryItem[]  @relation("owner")
+  subscription      Subscription?
+  rentalsAsBorrower Rental[]         @relation("borrower")
+  favorites         Favorite[]
+  reviewsAuthored   Review[]         @relation("rater")
+  payments          SimulatedPayment[]
+}
+
+// Title-level catalog metadata. Category-generic: `attributes` holds
+// category-specific fields validated by src/lib/categories/*.
+model CatalogItem {
+  id         String   @id @default(cuid())
+  category   Category @default(JIGSAW_PUZZLE)
+  title      String
+  brand      String?
+  imageUrl   String?
+  attributes Json     @default("{}") // e.g. { pieceCount: 1000 } for puzzles
+  createdAt  DateTime @default(now())
+
+  inventoryItems InventoryItem[]
+  favorites      Favorite[]
+  reviews        Review[]
+
+  @@index([category])
+  @@index([title])
+}
+
+// A physical copy — either user-owned (P2P) or platform-owned (warehouse).
+model InventoryItem {
+  id             String     @id @default(cuid())
+  catalogItemId  String
+  source         CopySource
+  ownerId        String? // null when source = WAREHOUSE
+  condition      String     @default("Good")
+  depositCents   Int
+  ratePerWeekCents Int
+  status         CopyStatus @default(AVAILABLE)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  catalogItem CatalogItem @relation(fields: [catalogItemId], references: [id], onDelete: Cascade)
+  owner       User?       @relation("owner", fields: [ownerId], references: [id], onDelete: Cascade)
+  rentals     Rental[]
+
+  @@index([status])
+  @@index([ownerId])
+  @@index([catalogItemId])
+}
+
+// ---------------------------------------------------------------------------
+// Subscriptions
+// ---------------------------------------------------------------------------
+
+model SubscriptionPlan {
+  id                String  @id @default(cuid())
+  name              String  @unique
+  monthlyPriceCents Int
+  monthlyCredits    Int // waives N rental fees / month
+  earlyAccess       Boolean @default(false)
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  userId             String             @unique
+  planId             String
+  status             SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart DateTime           @default(now())
+  currentPeriodEnd   DateTime
+  creditsRemaining   Int                @default(0)
+  createdAt          DateTime           @default(now())
+
+  user User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan SubscriptionPlan @relation(fields: [planId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// Rentals & lifecycle
+// ---------------------------------------------------------------------------
+
+model Rental {
+  id              String       @id @default(cuid())
+  inventoryItemId String
+  borrowerId      String
+  status          RentalStatus @default(REQUESTED)
+  periodDays      Int
+  quotedFeeCents  Int
+  usedCredit      Boolean      @default(false)
+
+  requestedAt DateTime  @default(now())
+  approvedAt  DateTime?
+  dueAt       DateTime?
+  returnedAt  DateTime?
+  completedAt DateTime?
+
+  inventoryItem InventoryItem      @relation(fields: [inventoryItemId], references: [id])
+  borrower      User               @relation("borrower", fields: [borrowerId], references: [id])
+  deposit       Deposit?
+  shipments     Shipment[]
+  conditionProof ConditionProof?
+  experience    RentalExperience?
+  payoutEntry   RevenueShareEntry?
+  dispute       Dispute?
+  reviews       Review[]
+
+  @@index([status])
+  @@index([borrowerId])
+  @@index([inventoryItemId])
+}
+
+model Deposit {
+  id             String        @id @default(cuid())
+  rentalId       String        @unique
+  amountCents    Int
+  status         DepositStatus @default(HELD)
+  refundedCents  Int?
+  forfeitedCents Int?
+
+  rental Rental @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+}
+
+model Shipment {
+  id             String            @id @default(cuid())
+  rentalId       String
+  direction      ShipmentDirection
+  carrierStub    String            @default("SIMULATED")
+  trackingNumber String
+  costCents      Int
+  paidByUserId   String
+  status         ShipmentStatus    @default(LABEL_CREATED)
+  labelUrlStub   String?
+  createdAt      DateTime          @default(now())
+
+  rental Rental @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+
+  @@index([rentalId])
+}
+
+// Photo proof that all pieces/components are present at return time.
+model ConditionProof {
+  id         String   @id @default(cuid())
+  rentalId   String   @unique
+  imageUrl   String
+  note       String?
+  uploadedAt DateTime @default(now())
+
+  rental Rental @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+}
+
+// Structured borrower survey captured at completion.
+model RentalExperience {
+  id                    String   @id @default(cuid())
+  rentalId              String   @unique
+  timeToCompleteHours   Float?
+  difficultyRating      Int? // 1-5
+  enjoymentRating       Int? // 1-5
+  missingPiecesReported Int      @default(0)
+  notes                 String?
+  createdAt             DateTime @default(now())
+
+  rental Rental @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Money ledger
+// ---------------------------------------------------------------------------
+
+// Payout ledger. Standing/tier/bonus are locked in at completion time.
+model RevenueShareEntry {
+  id                  String   @id @default(cuid())
+  rentalId            String   @unique
+  ownerId             String?
+  grossRentalFeeCents Int
+  ownerStanding       Float
+  platformFeePct      Int
+  platformFeeCents    Int
+  popularityBonusCents Int     @default(0)
+  ownerPayoutCents    Int
+  status              String   @default("PAID")
+  createdAt           DateTime @default(now())
+
+  rental Rental @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+}
+
+// Full simulated money-movement audit trail.
+model SimulatedPayment {
+  id          String      @id @default(cuid())
+  userId      String?
+  type        PaymentType
+  amountCents Int
+  referenceId String // rentalId / depositId / subscriptionId
+  note        String?
+  createdAt   DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([referenceId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Trust, reputation, demand
+// ---------------------------------------------------------------------------
+
+model Dispute {
+  id                String        @id @default(cuid())
+  rentalId          String        @unique
+  raisedByUserId    String
+  reason            String
+  status            DisputeStatus @default(OPEN)
+  resolvedByAdminId String?
+  resolutionNotes   String?
+  createdAt         DateTime      @default(now())
+  resolvedAt        DateTime?
+
+  rental Rental @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+}
+
+model Review {
+  id            String   @id @default(cuid())
+  rentalId      String
+  raterId       String
+  catalogItemId String?
+  rating        Int // 1-5
+  comment       String?
+  createdAt     DateTime @default(now())
+
+  rental      Rental       @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+  rater       User         @relation("rater", fields: [raterId], references: [id], onDelete: Cascade)
+  catalogItem CatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+
+  @@index([catalogItemId])
+}
+
+// Wishlist — a pre-rental demand signal feeding popularity.
+model Favorite {
+  id            String   @id @default(cuid())
+  userId        String
+  catalogItemId String
+  createdAt     DateTime @default(now())
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  catalogItem CatalogItem @relation(fields: [catalogItemId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, catalogItemId])
+  @@index([catalogItemId])
+}

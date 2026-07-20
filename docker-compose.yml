@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16
+    container_name: puzzle_marketplace_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: puzzle
+      POSTGRES_PASSWORD: puzzle
+      POSTGRES_DB: puzzle_marketplace
+    ports:
+      - "5432:5432"
+    volumes:
+      - puzzle_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U puzzle -d puzzle_marketplace"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  puzzle_pgdata:
