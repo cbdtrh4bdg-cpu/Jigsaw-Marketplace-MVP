@@ -1,5 +1,5 @@
-import { prisma } from "@/lib/db";
-import { InventorySource } from "@prisma/client";
+import { InventorySource } from "@/lib/db-types";
+import { listInventoryWithCatalog } from "@/lib/data";
 import { Badge, Card } from "@/components/ui";
 import { ListingForm } from "@/components/ListingForm";
 import { PuzzleCard } from "@/components/PuzzleCard";
@@ -7,10 +7,8 @@ import { PuzzleCard } from "@/components/PuzzleCard";
 export const dynamic = "force-dynamic";
 
 export default async function AdminWarehousePage() {
-  const items = await prisma.inventoryItem.findMany({
-    where: { source: InventorySource.WAREHOUSE },
-    include: { catalogItem: true },
-    orderBy: { createdAt: "desc" },
+  const items = await listInventoryWithCatalog({
+    source: InventorySource.WAREHOUSE,
   });
 
   return (

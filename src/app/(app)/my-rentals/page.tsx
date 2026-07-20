@@ -1,17 +1,13 @@
-import { prisma } from "@/lib/db";
 import { requireUserPage } from "@/lib/pageAuth";
-import { rentalViewInclude, serializeRental } from "@/lib/serializeRental";
+import { listFullRentalsBy } from "@/lib/data";
+import { serializeRental } from "@/lib/serializeRental";
 import { RentalActions } from "@/components/rental/RentalActions";
 
 export const dynamic = "force-dynamic";
 
 export default async function MyRentalsPage() {
   const user = await requireUserPage("/my-rentals");
-  const rentals = await prisma.rental.findMany({
-    where: { borrowerId: user.id },
-    include: rentalViewInclude,
-    orderBy: { requestedAt: "desc" },
-  });
+  const rentals = await listFullRentalsBy("borrowerId", user.id);
 
   return (
     <div>

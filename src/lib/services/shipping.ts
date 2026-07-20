@@ -1,5 +1,5 @@
 import { SIMULATED_SHIPPING_COST_CENTS } from "@/lib/config";
-import type { ShipmentDirection } from "@prisma/client";
+import type { ShipmentDirection } from "@/lib/db-types";
 
 export interface RateQuote {
   costCents: number;

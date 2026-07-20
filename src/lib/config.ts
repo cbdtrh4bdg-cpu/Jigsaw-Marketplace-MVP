@@ -1,4 +1,4 @@
-import { PayerRole } from "@prisma/client";
+import { PayerRole } from "@/lib/db-types";
 
 /**
  * Central tunables. Everything a product/ops person might want to change lives

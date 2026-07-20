@@ -1,15 +1,23 @@
 import { notFound } from "next/navigation";
-import { prisma } from "@/lib/db";
 import { requireUserPage } from "@/lib/pageAuth";
 import { hasActiveSubscription } from "@/lib/permissions";
+import { supabaseAdmin } from "@/lib/supabase";
 import { getCategoryModule } from "@/lib/categories";
-import { InventoryStatus, InventorySource } from "@prisma/client";
+import {
+  InventoryStatus,
+  InventorySource,
+  RentalStatus,
+  type ReviewRow,
+} from "@/lib/db-types";
 import { Badge, Card } from "@/components/ui";
 import { formatCents } from "@/lib/money";
 import { RequestRentalForm } from "@/components/RequestRentalForm";
 import { FavoriteButton } from "@/components/FavoriteButton";
 import { ReviewForm } from "@/components/ReviewForm";
-import { RentalStatus } from "@prisma/client";
+import {
+  getInventoryWithCatalog,
+  getReviewsForCatalog,
+} from "@/lib/data";
 import { getTitleSignals } from "@/lib/services/revenueShareResolver";
 import { titlePopularity } from "@/lib/services/revenueShare";
 
@@ -22,49 +30,52 @@ export default async function PuzzleDetailPage({
 }) {
   const { copyId } = await params;
   const user = await requireUserPage(`/puzzles/${copyId}`);
+  const db = supabaseAdmin();
 
-  const item = await prisma.inventoryItem.findUnique({
-    where: { id: copyId },
-    include: {
-      catalogItem: { include: { reviews: { include: { user: true } } } },
-      owner: { select: { id: true, name: true } },
-    },
-  });
+  const item = await getInventoryWithCatalog(copyId);
   if (!item) notFound();
 
   const mod = getCategoryModule(item.catalogItem.category);
   const attrs = mod.attributeSchema.safeParse(item.catalogItem.attributes);
-  const [favorited, subscribed, signals, completedCount, myReview] =
-    await Promise.all([
-      prisma.favorite.findUnique({
-        where: {
-          userId_catalogItemId: {
-            userId: user.id,
-            catalogItemId: item.catalogItemId,
-          },
-        },
-      }),
-      hasActiveSubscription(user.id),
-      getTitleSignals(prisma, item.catalogItemId),
-      prisma.rental.count({
-        where: {
-          borrowerId: user.id,
-          status: RentalStatus.COMPLETED,
-          inventoryItem: { catalogItemId: item.catalogItemId },
-        },
-      }),
-      prisma.review.findUnique({
-        where: {
-          userId_catalogItemId: {
-            userId: user.id,
-            catalogItemId: item.catalogItemId,
-          },
-        },
-      }),
-    ]);
+
+  const [reviews, favorite, subscribed, signals] = await Promise.all([
+    getReviewsForCatalog(item.catalogItemId),
+    db
+      .from("Favorite")
+      .select("id")
+      .eq("userId", user.id)
+      .eq("catalogItemId", item.catalogItemId)
+      .maybeSingle(),
+    hasActiveSubscription(user.id),
+    getTitleSignals(item.catalogItemId),
+  ]);
+
+  // Has the viewer completed a rental of this title? (gates reviewing)
+  const { data: titleInv } = await db
+    .from("InventoryItem")
+    .select("id")
+    .eq("catalogItemId", item.catalogItemId);
+  const titleInvIds = ((titleInv as { id: string }[]) ?? []).map((r) => r.id);
+  let completedCount = 0;
+  if (titleInvIds.length > 0) {
+    const { count } = await db
+      .from("Rental")
+      .select("*", { head: true, count: "exact" })
+      .eq("borrowerId", user.id)
+      .eq("status", RentalStatus.COMPLETED)
+      .in("inventoryItemId", titleInvIds);
+    completedCount = count ?? 0;
+  }
+  const { data: myReviewRow } = await db
+    .from("Review")
+    .select("*")
+    .eq("userId", user.id)
+    .eq("catalogItemId", item.catalogItemId)
+    .maybeSingle();
+  const myReview = myReviewRow as ReviewRow | null;
+
   const canReview = completedCount > 0;
   const popularity = Math.round(titlePopularity(signals));
-
   const isOwn = item.ownerId === user.id;
   const unavailable = item.status !== InventoryStatus.AVAILABLE;
 
@@ -104,9 +115,7 @@ export default async function PuzzleDetailPage({
           <Badge tone="amber">Popularity {popularity}/100</Badge>
           <span>· {signals.completedRentals} completed rentals</span>
           <span>· {signals.favorites} wishlisted</span>
-          {signals.avgRating > 0 ? (
-            <span>· ★ {signals.avgRating.toFixed(1)}</span>
-          ) : null}
+          {signals.avgRating > 0 ? <span>· ★ {signals.avgRating.toFixed(1)}</span> : null}
         </div>
         {item.condition ? (
           <p className="mt-4 text-sm text-slate-600">
@@ -120,7 +129,7 @@ export default async function PuzzleDetailPage({
         <div className="mt-4">
           <FavoriteButton
             catalogItemId={item.catalogItemId}
-            initialFavorited={Boolean(favorited)}
+            initialFavorited={Boolean(favorite.data)}
           />
         </div>
 
@@ -135,18 +144,16 @@ export default async function PuzzleDetailPage({
               />
             </div>
           ) : null}
-          {item.catalogItem.reviews.length === 0 ? (
+          {reviews.length === 0 ? (
             <p className="text-sm text-slate-500">No reviews yet.</p>
           ) : (
             <ul className="space-y-3">
-              {item.catalogItem.reviews.map((r) => (
+              {reviews.map((r) => (
                 <li key={r.id} className="rounded-lg border border-slate-200 p-3">
                   <p className="text-sm font-medium">
                     {"★".repeat(r.rating)}
-                    <span className="text-slate-300">
-                      {"★".repeat(5 - r.rating)}
-                    </span>{" "}
-                    <span className="text-slate-500">— {r.user.name}</span>
+                    <span className="text-slate-300">{"★".repeat(5 - r.rating)}</span>{" "}
+                    <span className="text-slate-500">— {r.user?.name}</span>
                   </p>
                   {r.comment ? (
                     <p className="mt-1 text-sm text-slate-600">{r.comment}</p>

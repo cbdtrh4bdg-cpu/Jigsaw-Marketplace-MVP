@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RentalStatus } from "@prisma/client";
+import { RentalStatus } from "@/lib/db-types";
 import {
   ALLOWED_TRANSITIONS,
   assertTransition,

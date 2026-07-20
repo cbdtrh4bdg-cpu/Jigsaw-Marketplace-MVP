@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Category } from "@prisma/client";
+import type { Category } from "@/lib/db-types";
 
 /**
  * A CategoryModule is the ONLY category-aware code in the app. Everything else

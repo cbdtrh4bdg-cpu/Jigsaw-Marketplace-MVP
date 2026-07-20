@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Category } from "@prisma/client";
+import { Category } from "@/lib/db-types";
 import { getCategoryModule } from "@/lib/categories";
 import { Button, Field, Input, Select } from "@/components/ui";
 

@@ -1,5 +1,6 @@
-import { prisma } from "@/lib/db";
 import { requireUserPage } from "@/lib/pageAuth";
+import { supabaseAdmin } from "@/lib/supabase";
+import type { SubscriptionPlanRow, SubscriptionRow } from "@/lib/db-types";
 import { Badge, Card } from "@/components/ui";
 import { PlanPicker } from "@/components/PlanPicker";
 
@@ -7,16 +8,17 @@ export const dynamic = "force-dynamic";
 
 export default async function SubscribePage() {
   const user = await requireUserPage("/subscribe");
-  const [plans, subscription] = await Promise.all([
-    prisma.subscriptionPlan.findMany({
-      where: { active: true },
-      orderBy: { priceCents: "asc" },
-    }),
-    prisma.subscription.findUnique({
-      where: { userId: user.id },
-      include: { plan: true },
-    }),
+  const db = supabaseAdmin();
+
+  const [{ data: planRows }, { data: subRow }] = await Promise.all([
+    db.from("SubscriptionPlan").select("*").eq("active", true).order("priceCents"),
+    db.from("Subscription").select("*").eq("userId", user.id).maybeSingle(),
   ]);
+  const plans = (planRows as SubscriptionPlanRow[] | null) ?? [];
+  const subscription = subRow as SubscriptionRow | null;
+  const currentPlan = subscription
+    ? plans.find((p) => p.id === subscription.planId)
+    : undefined;
 
   return (
     <div>
@@ -26,25 +28,23 @@ export default async function SubscribePage() {
         Monthly credits offset per-rental fees; shipping is always pass-through.
       </p>
 
-      {subscription ? (
+      {subscription && currentPlan ? (
         <Card className="mb-6">
           <div className="flex items-center justify-between">
             <div>
-              <p className="font-semibold">{subscription.plan.name} plan</p>
+              <p className="font-semibold">{currentPlan.name} plan</p>
               <p className="text-sm text-slate-500">
-                Renews {subscription.currentPeriodEnd.toLocaleDateString()}
+                Renews {new Date(subscription.currentPeriodEnd).toLocaleDateString()}
               </p>
             </div>
-            <div className="text-right">
-              <Badge tone="indigo">
-                {subscription.creditsRemaining} credits left
-              </Badge>
-            </div>
+            <Badge tone="indigo">
+              {subscription.creditsRemaining} credits left
+            </Badge>
           </div>
         </Card>
       ) : null}
 
-      <PlanPicker plans={plans} currentPlanKey={subscription?.plan.key} />
+      <PlanPicker plans={plans} currentPlanKey={currentPlan?.key} />
     </div>
   );
 }

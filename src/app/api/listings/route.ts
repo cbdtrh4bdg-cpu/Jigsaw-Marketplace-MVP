@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { InventorySource } from "@prisma/client";
+import { InventorySource } from "@/lib/db-types";
 import { handle } from "@/lib/api";
 import { requireUser } from "@/lib/permissions";
 import { listingSchema } from "@/lib/validation";

@@ -1,5 +1,9 @@
-import { prisma } from "@/lib/db";
-import { PaymentType } from "@prisma/client";
+import { supabaseAdmin } from "@/lib/supabase";
+import {
+  PaymentType,
+  type SubscriptionPlanRow,
+  type SubscriptionRow,
+} from "@/lib/db-types";
 import { getPaymentProvider } from "./payments";
 
 export class SubscriptionError extends Error {
@@ -18,40 +22,43 @@ export class SubscriptionError extends Error {
  * one month.
  */
 export async function subscribe(userId: string, planKey: string) {
-  return prisma.$transaction(async (tx) => {
-    const plan = await tx.subscriptionPlan.findUnique({ where: { key: planKey } });
-    if (!plan || !plan.active) {
-      throw new SubscriptionError("Unknown or inactive plan", 404);
-    }
+  const db = supabaseAdmin();
+  const { data: planRow } = await db
+    .from("SubscriptionPlan")
+    .select("*")
+    .eq("key", planKey)
+    .maybeSingle();
+  const plan = planRow as SubscriptionPlanRow | null;
+  if (!plan || !plan.active) {
+    throw new SubscriptionError("Unknown or inactive plan", 404);
+  }
 
-    const periodEnd = new Date();
-    periodEnd.setMonth(periodEnd.getMonth() + 1);
+  const periodEnd = new Date();
+  periodEnd.setMonth(periodEnd.getMonth() + 1);
 
-    if (plan.priceCents > 0) {
-      await getPaymentProvider().record(tx, {
-        userId,
-        type: PaymentType.SUBSCRIPTION,
-        amountCents: plan.priceCents,
-        note: `Subscription: ${plan.name}`,
-      });
-    }
-
-    return tx.subscription.upsert({
-      where: { userId },
-      create: {
-        userId,
-        planId: plan.id,
-        active: true,
-        creditsRemaining: plan.monthlyCredits,
-        currentPeriodEnd: periodEnd,
-      },
-      update: {
-        planId: plan.id,
-        active: true,
-        creditsRemaining: plan.monthlyCredits,
-        currentPeriodEnd: periodEnd,
-      },
-      include: { plan: true },
+  if (plan.priceCents > 0) {
+    await getPaymentProvider().record({
+      userId,
+      type: PaymentType.SUBSCRIPTION,
+      amountCents: plan.priceCents,
+      note: `Subscription: ${plan.name}`,
     });
-  });
+  }
+
+  const { data, error } = await db
+    .from("Subscription")
+    .upsert(
+      {
+        userId,
+        planId: plan.id,
+        active: true,
+        creditsRemaining: plan.monthlyCredits,
+        currentPeriodEnd: periodEnd.toISOString(),
+      },
+      { onConflict: "userId" },
+    )
+    .select("*")
+    .single();
+  if (error) throw new SubscriptionError(`Subscription failed: ${error.message}`, 500);
+  return { ...(data as SubscriptionRow), plan };
 }

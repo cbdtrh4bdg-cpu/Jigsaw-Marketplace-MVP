@@ -1,17 +1,13 @@
 import type { NextAuthOptions } from "next-auth";
-import type { Adapter } from "next-auth/adapters";
 import CredentialsProvider from "next-auth/providers/credentials";
-import { PrismaAdapter } from "@auth/prisma-adapter";
 import bcrypt from "bcryptjs";
 import { getServerSession } from "next-auth";
-import { prisma } from "@/lib/db";
-import { Role } from "@prisma/client";
+import { supabaseAdmin } from "@/lib/supabase";
+import { Role, type UserRow } from "@/lib/db-types";
 
 export const authOptions: NextAuthOptions = {
-  // Cast bridges a duplicated @auth/core version between the adapter and
-  // next-auth v4; runtime shape is identical.
-  adapter: PrismaAdapter(prisma) as Adapter,
-  // Credentials provider requires JWT session strategy in NextAuth v4.
+  // Credentials provider requires the JWT session strategy — no DB adapter
+  // needed, so Supabase is only used to look up the user in authorize().
   session: { strategy: "jwt" },
   pages: { signIn: "/login" },
   providers: [
@@ -23,9 +19,12 @@ export const authOptions: NextAuthOptions = {
       },
       async authorize(credentials) {
         if (!credentials?.email || !credentials.password) return null;
-        const user = await prisma.user.findUnique({
-          where: { email: credentials.email.toLowerCase() },
-        });
+        const { data } = await supabaseAdmin()
+          .from("User")
+          .select("*")
+          .eq("email", credentials.email.toLowerCase())
+          .maybeSingle();
+        const user = data as UserRow | null;
         if (!user?.passwordHash) return null;
         const ok = await bcrypt.compare(credentials.password, user.passwordHash);
         if (!ok) return null;

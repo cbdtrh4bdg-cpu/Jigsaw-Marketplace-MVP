@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { auth } from "@/lib/auth";
-import { Role } from "@prisma/client";
+import { Role } from "@/lib/db-types";
 import { SignOutButton } from "./SignOutButton";
 
 export async function Nav() {

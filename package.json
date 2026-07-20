@@ -5,23 +5,17 @@
   "description": "Jigsaw puzzle rental marketplace + subscription service (hybrid P2P + warehouse).",
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && next build",
+    "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "prisma:studio": "prisma studio",
-    "db:seed": "prisma db seed"
-  },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
+    "db:reset": "bash supabase/apply.sh",
+    "db:seed": "psql \"$DIRECT_DB_URL\" -f supabase/seed.sql"
   },
   "dependencies": {
-    "@auth/prisma-adapter": "^2.7.4",
-    "@prisma/client": "^6.2.1",
+    "@supabase/supabase-js": "^2.110.7",
     "bcryptjs": "^2.4.3",
     "clsx": "^2.1.1",
     "next": "^15.1.6",
@@ -38,7 +32,6 @@
     "@types/react-dom": "^19.0.3",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.5.1",
-    "prisma": "^6.2.1",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

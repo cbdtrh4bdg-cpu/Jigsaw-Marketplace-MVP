@@ -1,22 +1,21 @@
-import { prisma } from "@/lib/db";
+import { supabaseAdmin } from "@/lib/supabase";
 import {
-  DepositStatus,
-  DisputeStatus,
   InventoryStatus,
   PayerRole,
-  PaymentType,
-  Prisma,
   RentalStatus,
   Role,
   ShipmentDirection,
-  ShipmentStatus,
-} from "@prisma/client";
+} from "@/lib/db-types";
 import { SHIPPING_POLICY, isValidPeriod } from "@/lib/config";
 import { applyCredits, computeDueAt, quoteRentalFeeCents } from "./pricing";
 import { assertTransition } from "./rentalStateMachine";
-import { getPaymentProvider } from "./payments";
 import { getShippingProvider } from "./shipping";
 import { resolveRevenueShare } from "./revenueShareResolver";
+import {
+  getFullRental,
+  getInventoryItem,
+  type FullRental,
+} from "@/lib/data";
 
 export class RentalError extends Error {
   constructor(
@@ -30,34 +29,22 @@ export class RentalError extends Error {
 
 type ActingUser = { id: string; role: Role };
 
-const rentalInclude = {
-  inventoryItem: { include: { catalogItem: true, owner: true } },
-  borrower: true,
-  deposit: true,
-  shipments: true,
-  conditionProof: true,
-  experience: true,
-  dispute: true,
-} satisfies Prisma.RentalInclude;
+function db() {
+  return supabaseAdmin();
+}
 
-async function loadRental(tx: Prisma.TransactionClient, id: string) {
-  const rental = await tx.rental.findUnique({ where: { id }, include: rentalInclude });
+async function loadRental(id: string): Promise<FullRental> {
+  const rental = await getFullRental(id);
   if (!rental) throw new RentalError("Rental not found", 404);
   return rental;
 }
 
-function isOwnerOrAdmin(
-  rental: { inventoryItem: { ownerId: string | null } },
-  user: ActingUser,
-): boolean {
+function isOwnerOrAdmin(rental: FullRental, user: ActingUser): boolean {
   if (user.role === Role.ADMIN) return true;
   return rental.inventoryItem.ownerId === user.id;
 }
 
-function payerFor(
-  role: PayerRole,
-  rental: { borrowerId: string; inventoryItem: { ownerId: string | null } },
-): string | null {
+function payerFor(role: PayerRole, rental: FullRental): string | null {
   switch (role) {
     case PayerRole.BORROWER:
       return rental.borrowerId;
@@ -66,6 +53,19 @@ function payerFor(
     case PayerRole.PLATFORM:
       return null;
   }
+}
+
+// Call an RPC and translate known plpgsql exceptions into RentalErrors.
+async function rpc(name: string, args: Record<string, unknown>) {
+  const { error } = await db().rpc(name, args);
+  if (!error) return;
+  if (error.message.includes("missing_condition_proof")) {
+    throw new RentalError("Upload the completion photo before shipping the return");
+  }
+  if (error.message.includes("rental_not_in_expected_state")) {
+    throw new RentalError("This rental changed state; refresh and try again", 409);
+  }
+  throw new Error(`RPC ${name} failed: ${error.message}`);
 }
 
 // --- Request --------------------------------------------------------------
@@ -78,9 +78,7 @@ export async function requestRental(input: {
   if (!isValidPeriod(input.periodDays)) {
     throw new RentalError(`Invalid rental period: ${input.periodDays} days`);
   }
-  const item = await prisma.inventoryItem.findUnique({
-    where: { id: input.inventoryItemId },
-  });
+  const item = await getInventoryItem(input.inventoryItemId);
   if (!item) throw new RentalError("Inventory item not found", 404);
   if (item.status !== InventoryStatus.AVAILABLE) {
     throw new RentalError("This copy is not currently available");
@@ -89,262 +87,134 @@ export async function requestRental(input: {
     throw new RentalError("You cannot borrow your own listing");
   }
 
-  return prisma.rental.create({
-    data: {
+  const { data, error } = await db()
+    .from("Rental")
+    .insert({
       inventoryItemId: item.id,
       borrowerId: input.borrowerId,
       periodDays: input.periodDays,
       status: RentalStatus.REQUESTED,
-    },
-    include: rentalInclude,
-  });
+    })
+    .select("id")
+    .single();
+  if (error) throw new Error(`Rental insert failed: ${error.message}`);
+  return loadRental((data as { id: string }).id);
 }
 
 // --- Approve / Decline / Cancel ------------------------------------------
 
 export async function approveRental(rentalId: string, user: ActingUser) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    if (!isOwnerOrAdmin(rental, user)) {
-      throw new RentalError("Only the owner can approve this request", 403);
-    }
-    assertTransition(rental.status, RentalStatus.APPROVED);
+  const rental = await loadRental(rentalId);
+  if (!isOwnerOrAdmin(rental, user)) {
+    throw new RentalError("Only the owner can approve this request", 403);
+  }
+  assertTransition(rental.status, RentalStatus.APPROVED);
 
-    const now = new Date();
-    const quotedFeeCents = quoteRentalFeeCents(
-      rental.inventoryItem.ratePerWeekCents,
-      rental.periodDays,
-    );
+  const now = new Date();
+  const quotedFeeCents = quoteRentalFeeCents(
+    rental.inventoryItem.ratePerWeekCents,
+    rental.periodDays,
+  );
 
-    // Apply subscription credits, then charge the remaining fee.
-    const sub = await tx.subscription.findUnique({
-      where: { userId: rental.borrowerId },
-    });
-    const { chargeCents, creditsApplied } = applyCredits(
-      quotedFeeCents,
-      sub?.creditsRemaining ?? 0,
-    );
+  // Apply subscription credits, then charge the remaining fee.
+  const { data: subRow } = await db()
+    .from("Subscription")
+    .select("creditsRemaining")
+    .eq("userId", rental.borrowerId)
+    .maybeSingle();
+  const credits = (subRow as { creditsRemaining: number } | null)?.creditsRemaining ?? 0;
+  const { chargeCents, creditsApplied } = applyCredits(quotedFeeCents, credits);
 
-    const payments = getPaymentProvider();
-    if (chargeCents > 0) {
-      await payments.record(tx, {
-        userId: rental.borrowerId,
-        rentalId: rental.id,
-        type: PaymentType.RENTAL_FEE,
-        amountCents: chargeCents,
-        note: `Rental fee (${rental.periodDays}d)`,
-      });
-    }
-    if (creditsApplied > 0 && sub) {
-      await tx.subscription.update({
-        where: { id: sub.id },
-        data: { creditsRemaining: { decrement: creditsApplied } },
-      });
-    }
-
-    // Hold the refundable deposit.
-    await payments.record(tx, {
-      userId: rental.borrowerId,
-      rentalId: rental.id,
-      type: PaymentType.DEPOSIT_HOLD,
-      amountCents: rental.inventoryItem.depositCents,
-      note: "Refundable deposit hold",
-    });
-    await tx.deposit.create({
-      data: {
-        rentalId: rental.id,
-        amountCents: rental.inventoryItem.depositCents,
-        status: DepositStatus.HELD,
-      },
-    });
-
-    // Reserve the copy so it can't be double-booked.
-    await tx.inventoryItem.update({
-      where: { id: rental.inventoryItemId },
-      data: { status: InventoryStatus.RESERVED },
-    });
-
-    return tx.rental.update({
-      where: { id: rental.id },
-      data: {
-        status: RentalStatus.APPROVED,
-        approvedAt: now,
-        dueAt: computeDueAt(now, rental.periodDays),
-        quotedFeeCents,
-        creditsApplied,
-      },
-      include: rentalInclude,
-    });
+  await rpc("approve_rental", {
+    p_rental_id: rental.id,
+    p_borrower_id: rental.borrowerId,
+    p_quoted_fee: quotedFeeCents,
+    p_credits_applied: creditsApplied,
+    p_charge_cents: chargeCents,
+    p_deposit_cents: rental.inventoryItem.depositCents,
+    p_due_at: computeDueAt(now, rental.periodDays).toISOString(),
   });
+  return loadRental(rental.id);
 }
 
 export async function declineRental(rentalId: string, user: ActingUser) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    if (!isOwnerOrAdmin(rental, user)) {
-      throw new RentalError("Only the owner can decline this request", 403);
-    }
-    assertTransition(rental.status, RentalStatus.DECLINED);
-    return tx.rental.update({
-      where: { id: rental.id },
-      data: { status: RentalStatus.DECLINED },
-      include: rentalInclude,
-    });
-  });
+  const rental = await loadRental(rentalId);
+  if (!isOwnerOrAdmin(rental, user)) {
+    throw new RentalError("Only the owner can decline this request", 403);
+  }
+  assertTransition(rental.status, RentalStatus.DECLINED);
+  await rpc("decline_rental", { p_rental_id: rental.id });
+  return loadRental(rental.id);
 }
 
 export async function cancelRental(rentalId: string, user: ActingUser) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    const isBorrower = rental.borrowerId === user.id;
-    if (!isBorrower && !isOwnerOrAdmin(rental, user)) {
-      throw new RentalError("Not authorized to cancel this rental", 403);
-    }
-    assertTransition(rental.status, RentalStatus.CANCELED);
-
-    // Refund anything already charged and release any reservation/deposit.
-    if (rental.status === RentalStatus.APPROVED) {
-      await releaseHoldAndReservation(tx, rental);
-    }
-    return tx.rental.update({
-      where: { id: rental.id },
-      data: { status: RentalStatus.CANCELED },
-      include: rentalInclude,
-    });
-  });
-}
-
-async function releaseHoldAndReservation(
-  tx: Prisma.TransactionClient,
-  rental: Awaited<ReturnType<typeof loadRental>>,
-) {
-  const payments = getPaymentProvider();
-  if (rental.deposit && rental.deposit.status === DepositStatus.HELD) {
-    await payments.record(tx, {
-      userId: rental.borrowerId,
-      rentalId: rental.id,
-      type: PaymentType.DEPOSIT_REFUND,
-      amountCents: rental.deposit.amountCents,
-      note: "Deposit refunded (canceled)",
-    });
-    await tx.deposit.update({
-      where: { rentalId: rental.id },
-      data: { status: DepositStatus.REFUNDED, resolvedAt: new Date() },
-    });
+  const rental = await loadRental(rentalId);
+  const isBorrower = rental.borrowerId === user.id;
+  if (!isBorrower && !isOwnerOrAdmin(rental, user)) {
+    throw new RentalError("Not authorized to cancel this rental", 403);
   }
-  await tx.inventoryItem.update({
-    where: { id: rental.inventoryItemId },
-    data: { status: InventoryStatus.AVAILABLE },
-  });
+  assertTransition(rental.status, RentalStatus.CANCELED);
+  await rpc("cancel_rental", { p_rental_id: rental.id });
+  return loadRental(rental.id);
 }
 
 // --- Shipping legs --------------------------------------------------------
 
 export async function shipToBorrower(rentalId: string, user: ActingUser) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    if (!isOwnerOrAdmin(rental, user)) {
-      throw new RentalError("Only the owner can mark this shipped", 403);
-    }
-    assertTransition(rental.status, RentalStatus.SHIPPED_TO_BORROWER);
-    await createShipmentLeg(tx, rental, ShipmentDirection.OUTBOUND, SHIPPING_POLICY.outboundPaidBy);
-    return tx.rental.update({
-      where: { id: rental.id },
-      data: { status: RentalStatus.SHIPPED_TO_BORROWER, shippedAt: new Date() },
-      include: rentalInclude,
-    });
+  const rental = await loadRental(rentalId);
+  if (!isOwnerOrAdmin(rental, user)) {
+    throw new RentalError("Only the owner can mark this shipped", 403);
+  }
+  assertTransition(rental.status, RentalStatus.SHIPPED_TO_BORROWER);
+  const label = await getShippingProvider().buyLabel(ShipmentDirection.OUTBOUND);
+  await rpc("ship_to_borrower", {
+    p_rental_id: rental.id,
+    p_cost: label.costCents,
+    p_tracking: label.trackingCode,
+    p_paid_by_role: SHIPPING_POLICY.outboundPaidBy,
+    p_paid_by_user: payerFor(SHIPPING_POLICY.outboundPaidBy, rental),
   });
+  return loadRental(rental.id);
 }
 
 export async function receiveByBorrower(rentalId: string, user: ActingUser) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    if (rental.borrowerId !== user.id && user.role !== Role.ADMIN) {
-      throw new RentalError("Only the borrower can confirm receipt", 403);
-    }
-    assertTransition(rental.status, RentalStatus.IN_HAND);
-    await tx.shipment.updateMany({
-      where: { rentalId: rental.id, direction: ShipmentDirection.OUTBOUND },
-      data: { status: ShipmentStatus.DELIVERED, deliveredAt: new Date() },
-    });
-    return tx.rental.update({
-      where: { id: rental.id },
-      data: { status: RentalStatus.IN_HAND, receivedAt: new Date() },
-      include: rentalInclude,
-    });
-  });
+  const rental = await loadRental(rentalId);
+  if (rental.borrowerId !== user.id && user.role !== Role.ADMIN) {
+    throw new RentalError("Only the borrower can confirm receipt", 403);
+  }
+  assertTransition(rental.status, RentalStatus.IN_HAND);
+  await rpc("receive_by_borrower", { p_rental_id: rental.id });
+  return loadRental(rental.id);
 }
 
 export async function returnShip(rentalId: string, user: ActingUser) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    if (rental.borrowerId !== user.id && user.role !== Role.ADMIN) {
-      throw new RentalError("Only the borrower can ship the return", 403);
-    }
-    // Gate: cannot return without uploading the completion photo proof.
-    if (!rental.conditionProof) {
-      throw new RentalError(
-        "Upload the completion photo before shipping the return",
-      );
-    }
-    assertTransition(rental.status, RentalStatus.RETURN_SHIPPED);
-    await createShipmentLeg(tx, rental, ShipmentDirection.RETURN, SHIPPING_POLICY.returnPaidBy);
-    return tx.rental.update({
-      where: { id: rental.id },
-      data: { status: RentalStatus.RETURN_SHIPPED, returnShippedAt: new Date() },
-      include: rentalInclude,
-    });
+  const rental = await loadRental(rentalId);
+  if (rental.borrowerId !== user.id && user.role !== Role.ADMIN) {
+    throw new RentalError("Only the borrower can ship the return", 403);
+  }
+  if (!rental.conditionProof) {
+    throw new RentalError("Upload the completion photo before shipping the return");
+  }
+  assertTransition(rental.status, RentalStatus.RETURN_SHIPPED);
+  const label = await getShippingProvider().buyLabel(ShipmentDirection.RETURN);
+  await rpc("return_ship", {
+    p_rental_id: rental.id,
+    p_cost: label.costCents,
+    p_tracking: label.trackingCode,
+    p_paid_by_role: SHIPPING_POLICY.returnPaidBy,
+    p_paid_by_user: payerFor(SHIPPING_POLICY.returnPaidBy, rental),
   });
+  return loadRental(rental.id);
 }
 
 export async function markReturned(rentalId: string, user: ActingUser) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    if (!isOwnerOrAdmin(rental, user)) {
-      throw new RentalError("Only the owner can confirm the return", 403);
-    }
-    assertTransition(rental.status, RentalStatus.RETURNED);
-    await tx.shipment.updateMany({
-      where: { rentalId: rental.id, direction: ShipmentDirection.RETURN },
-      data: { status: ShipmentStatus.DELIVERED, deliveredAt: new Date() },
-    });
-    return tx.rental.update({
-      where: { id: rental.id },
-      data: { status: RentalStatus.RETURNED, returnedAt: new Date() },
-      include: rentalInclude,
-    });
-  });
-}
-
-async function createShipmentLeg(
-  tx: Prisma.TransactionClient,
-  rental: Awaited<ReturnType<typeof loadRental>>,
-  direction: ShipmentDirection,
-  paidByRole: PayerRole,
-) {
-  const shipping = getShippingProvider();
-  const label = await shipping.buyLabel(direction);
-  const paidByUserId = payerFor(paidByRole, rental);
-
-  await tx.shipment.create({
-    data: {
-      rentalId: rental.id,
-      direction,
-      status: ShipmentStatus.IN_TRANSIT,
-      costCents: label.costCents,
-      paidByUserId,
-      paidByRole,
-      trackingCode: label.trackingCode,
-    },
-  });
-
-  await getPaymentProvider().record(tx, {
-    userId: paidByUserId,
-    rentalId: rental.id,
-    type: PaymentType.SHIPPING,
-    amountCents: label.costCents,
-    note: `${direction} shipping (paid by ${paidByRole})`,
-  });
+  const rental = await loadRental(rentalId);
+  if (!isOwnerOrAdmin(rental, user)) {
+    throw new RentalError("Only the owner can confirm the return", 403);
+  }
+  assertTransition(rental.status, RentalStatus.RETURNED);
+  await rpc("mark_returned", { p_rental_id: rental.id });
+  return loadRental(rental.id);
 }
 
 // --- Condition proof + survey --------------------------------------------
@@ -354,19 +224,23 @@ export async function uploadConditionProof(
   user: ActingUser,
   input: { imageUrl: string; note?: string },
 ) {
-  const rental = await prisma.rental.findUnique({ where: { id: rentalId } });
-  if (!rental) throw new RentalError("Rental not found", 404);
+  const rental = await loadRental(rentalId);
   if (rental.borrowerId !== user.id && user.role !== Role.ADMIN) {
     throw new RentalError("Only the borrower can upload the proof", 403);
   }
   if (rental.status !== RentalStatus.IN_HAND) {
     throw new RentalError("Proof can only be uploaded while the copy is in hand");
   }
-  return prisma.conditionProof.upsert({
-    where: { rentalId },
-    create: { rentalId, imageUrl: input.imageUrl, note: input.note },
-    update: { imageUrl: input.imageUrl, note: input.note },
-  });
+  const { data, error } = await db()
+    .from("ConditionProof")
+    .upsert(
+      { rentalId, imageUrl: input.imageUrl, note: input.note ?? null },
+      { onConflict: "rentalId" },
+    )
+    .select("*")
+    .single();
+  if (error) throw new Error(`Proof upsert failed: ${error.message}`);
+  return data;
 }
 
 export async function submitExperience(
@@ -380,30 +254,52 @@ export async function submitExperience(
     notes?: string;
   },
 ) {
-  const rental = await prisma.rental.findUnique({ where: { id: rentalId } });
-  if (!rental) throw new RentalError("Rental not found", 404);
+  const rental = await loadRental(rentalId);
   if (rental.borrowerId !== user.id && user.role !== Role.ADMIN) {
     throw new RentalError("Only the borrower can submit the survey", 403);
   }
-  return prisma.rentalExperience.upsert({
-    where: { rentalId },
-    create: { rentalId, missingPiecesReported: 0, ...input },
-    update: { ...input },
-  });
+  const { data, error } = await db()
+    .from("RentalExperience")
+    .upsert(
+      {
+        rentalId,
+        timeToCompleteHours: input.timeToCompleteHours ?? null,
+        difficultyRating: input.difficultyRating ?? null,
+        enjoymentRating: input.enjoymentRating ?? null,
+        missingPiecesReported: input.missingPiecesReported ?? 0,
+        notes: input.notes ?? null,
+      },
+      { onConflict: "rentalId" },
+    )
+    .select("*")
+    .single();
+  if (error) throw new Error(`Survey upsert failed: ${error.message}`);
+  return data;
 }
 
 // --- Inspection: complete or dispute -------------------------------------
 
 export async function inspectComplete(rentalId: string, user: ActingUser) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    if (!isOwnerOrAdmin(rental, user)) {
-      throw new RentalError("Only the owner can complete this rental", 403);
-    }
-    assertTransition(rental.status, RentalStatus.COMPLETED);
-    await refundDepositAndPayout(tx, rental, { forfeitCents: 0 });
-    return finalizeCompleted(tx, rental.id, rental.inventoryItemId);
+  const rental = await loadRental(rentalId);
+  if (!isOwnerOrAdmin(rental, user)) {
+    throw new RentalError("Only the owner can complete this rental", 403);
+  }
+  assertTransition(rental.status, RentalStatus.COMPLETED);
+  const split = await resolveRevenueShare(rental.id);
+  await rpc("complete_rental", {
+    p_rental_id: rental.id,
+    p_expected_status: RentalStatus.RETURNED,
+    p_forfeit_cents: 0,
+    p_owner_id: split.ownerId,
+    p_fee: split.feeCents,
+    p_owner_standing: split.ownerStanding,
+    p_platform_bps: split.platformFeeBps,
+    p_bonus_bps: split.popularityBonusBps,
+    p_owner_payout: split.ownerPayoutCents,
+    p_platform_cents: split.platformCents,
+    p_resolution: null,
   });
+  return loadRental(rental.id);
 }
 
 export async function openDispute(
@@ -411,26 +307,17 @@ export async function openDispute(
   user: ActingUser,
   input: { reason: string },
 ) {
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    if (!isOwnerOrAdmin(rental, user)) {
-      throw new RentalError("Only the owner can open a dispute", 403);
-    }
-    assertTransition(rental.status, RentalStatus.DISPUTED);
-    await tx.dispute.create({
-      data: {
-        rentalId: rental.id,
-        openedById: user.id,
-        reason: input.reason,
-        status: DisputeStatus.OPEN,
-      },
-    });
-    return tx.rental.update({
-      where: { id: rental.id },
-      data: { status: RentalStatus.DISPUTED },
-      include: rentalInclude,
-    });
+  const rental = await loadRental(rentalId);
+  if (!isOwnerOrAdmin(rental, user)) {
+    throw new RentalError("Only the owner can open a dispute", 403);
+  }
+  assertTransition(rental.status, RentalStatus.DISPUTED);
+  await rpc("open_dispute", {
+    p_rental_id: rental.id,
+    p_opened_by: user.id,
+    p_reason: input.reason,
   });
+  return loadRental(rental.id);
 }
 
 export async function resolveDispute(
@@ -441,114 +328,25 @@ export async function resolveDispute(
   if (user.role !== Role.ADMIN) {
     throw new RentalError("Only an admin can resolve disputes", 403);
   }
-  return prisma.$transaction(async (tx) => {
-    const rental = await loadRental(tx, rentalId);
-    assertTransition(rental.status, RentalStatus.COMPLETED);
-    const forfeit = Math.max(
-      0,
-      Math.min(input.forfeitCents, rental.deposit?.amountCents ?? 0),
-    );
-    await refundDepositAndPayout(tx, rental, { forfeitCents: forfeit });
-    await tx.dispute.update({
-      where: { rentalId: rental.id },
-      data: {
-        status: DisputeStatus.RESOLVED,
-        resolution: input.resolution,
-        forfeitCents: forfeit,
-        resolvedAt: new Date(),
-      },
-    });
-    return finalizeCompleted(tx, rental.id, rental.inventoryItemId);
+  const rental = await loadRental(rentalId);
+  assertTransition(rental.status, RentalStatus.COMPLETED);
+  const forfeit = Math.max(
+    0,
+    Math.min(input.forfeitCents, rental.deposit?.amountCents ?? 0),
+  );
+  const split = await resolveRevenueShare(rental.id);
+  await rpc("complete_rental", {
+    p_rental_id: rental.id,
+    p_expected_status: RentalStatus.DISPUTED,
+    p_forfeit_cents: forfeit,
+    p_owner_id: split.ownerId,
+    p_fee: split.feeCents,
+    p_owner_standing: split.ownerStanding,
+    p_platform_bps: split.platformFeeBps,
+    p_bonus_bps: split.popularityBonusBps,
+    p_owner_payout: split.ownerPayoutCents,
+    p_platform_cents: split.platformCents,
+    p_resolution: input.resolution,
   });
-}
-
-/**
- * Settle the deposit (refund the un-forfeited remainder; route forfeited money
- * to the lender for P2P or the platform for warehouse) and pay out the rental
- * fee via the revenue-share split.
- */
-async function refundDepositAndPayout(
-  tx: Prisma.TransactionClient,
-  rental: Awaited<ReturnType<typeof loadRental>>,
-  opts: { forfeitCents: number },
-) {
-  const payments = getPaymentProvider();
-  const deposit = rental.deposit;
-  if (deposit && deposit.status === DepositStatus.HELD) {
-    const forfeit = Math.min(opts.forfeitCents, deposit.amountCents);
-    const refund = deposit.amountCents - forfeit;
-
-    if (refund > 0) {
-      await payments.record(tx, {
-        userId: rental.borrowerId,
-        rentalId: rental.id,
-        type: PaymentType.DEPOSIT_REFUND,
-        amountCents: refund,
-        note: "Deposit refunded",
-      });
-    }
-    if (forfeit > 0) {
-      // Forfeited money goes to the lender (P2P) or platform (warehouse).
-      await payments.record(tx, {
-        userId: rental.inventoryItem.ownerId, // null => platform
-        rentalId: rental.id,
-        type: PaymentType.DEPOSIT_FORFEIT,
-        amountCents: forfeit,
-        note: "Deposit forfeited (damage/missing pieces)",
-      });
-    }
-    await tx.deposit.update({
-      where: { rentalId: rental.id },
-      data: {
-        status:
-          forfeit === 0
-            ? DepositStatus.REFUNDED
-            : forfeit >= deposit.amountCents
-              ? DepositStatus.FORFEITED
-              : DepositStatus.PARTIALLY_FORFEITED,
-        forfeitedCents: forfeit,
-        resolvedAt: new Date(),
-      },
-    });
-  }
-
-  // Revenue-share payout for the rental fee (locked in at completion).
-  const split = await resolveRevenueShare(tx, rental.id);
-  await tx.revenueShareEntry.create({
-    data: {
-      rentalId: rental.id,
-      ownerId: split.ownerId,
-      feeCents: split.feeCents,
-      ownerStanding: split.ownerStanding,
-      platformFeeBps: split.platformFeeBps,
-      popularityBonusBps: split.popularityBonusBps,
-      ownerPayoutCents: split.ownerPayoutCents,
-      platformCents: split.platformCents,
-    },
-  });
-  if (split.ownerId && split.ownerPayoutCents > 0) {
-    await payments.record(tx, {
-      userId: split.ownerId,
-      rentalId: rental.id,
-      type: PaymentType.PAYOUT,
-      amountCents: split.ownerPayoutCents,
-      note: "Owner payout",
-    });
-  }
-}
-
-async function finalizeCompleted(
-  tx: Prisma.TransactionClient,
-  rentalId: string,
-  inventoryItemId: string,
-) {
-  await tx.inventoryItem.update({
-    where: { id: inventoryItemId },
-    data: { status: InventoryStatus.AVAILABLE },
-  });
-  return tx.rental.update({
-    where: { id: rentalId },
-    data: { status: RentalStatus.COMPLETED, completedAt: new Date() },
-    include: rentalInclude,
-  });
+  return loadRental(rental.id);
 }

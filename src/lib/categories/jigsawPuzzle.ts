@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Category } from "@prisma/client";
+import { Category } from "@/lib/db-types";
 import type { CategoryModule } from "./types";
 
 export const jigsawAttributeSchema = z.object({

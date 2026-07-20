@@ -1,18 +1,6 @@
-import type { Prisma } from "@prisma/client";
-import { ShipmentDirection } from "@prisma/client";
+import { ShipmentDirection } from "@/lib/db-types";
+import type { FullRental } from "@/lib/data";
 import type { RentalView } from "@/components/rental/types";
-
-export const rentalViewInclude = {
-  inventoryItem: { include: { catalogItem: true, owner: true } },
-  borrower: true,
-  deposit: true,
-  shipments: true,
-  conditionProof: true,
-  experience: true,
-  dispute: true,
-} satisfies Prisma.RentalInclude;
-
-type FullRental = Prisma.RentalGetPayload<{ include: typeof rentalViewInclude }>;
 
 export function serializeRental(
   r: FullRental,
@@ -25,7 +13,7 @@ export function serializeRental(
     status: r.status,
     periodDays: r.periodDays,
     quotedFeeCents: r.quotedFeeCents,
-    dueAt: r.dueAt ? r.dueAt.toISOString() : null,
+    dueAt: r.dueAt,
     title: r.inventoryItem.catalogItem.title,
     imageUrl: r.inventoryItem.catalogItem.imageUrl,
     category: r.inventoryItem.catalogItem.category,

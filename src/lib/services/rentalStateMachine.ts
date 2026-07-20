@@ -1,4 +1,4 @@
-import { RentalStatus } from "@prisma/client";
+import { RentalStatus } from "@/lib/db-types";
 
 /**
  * The rental lifecycle graph. Pure & DB-free so illegal-transition guards are

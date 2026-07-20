@@ -1,16 +1,12 @@
-import { prisma } from "@/lib/db";
-import { RentalStatus } from "@prisma/client";
-import { rentalViewInclude, serializeRental } from "@/lib/serializeRental";
+import { RentalStatus } from "@/lib/db-types";
+import { listFullRentalsBy } from "@/lib/data";
+import { serializeRental } from "@/lib/serializeRental";
 import { RentalActions } from "@/components/rental/RentalActions";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminDisputesPage() {
-  const rentals = await prisma.rental.findMany({
-    where: { status: RentalStatus.DISPUTED },
-    include: rentalViewInclude,
-    orderBy: { requestedAt: "desc" },
-  });
+  const rentals = await listFullRentalsBy("status", RentalStatus.DISPUTED);
 
   return (
     <div>

@@ -1,5 +1,6 @@
-import { prisma } from "@/lib/db";
 import { requireUserPage } from "@/lib/pageAuth";
+import { supabaseAdmin } from "@/lib/supabase";
+import { listInventoryWithCatalog } from "@/lib/data";
 import { Badge, Card } from "@/components/ui";
 import { ListingForm } from "@/components/ListingForm";
 import { PuzzleCard } from "@/components/PuzzleCard";
@@ -8,11 +9,20 @@ export const dynamic = "force-dynamic";
 
 export default async function MyListingsPage() {
   const user = await requireUserPage("/my-listings");
-  const items = await prisma.inventoryItem.findMany({
-    where: { ownerId: user.id },
-    include: { catalogItem: true, rentals: { where: { status: { notIn: ["COMPLETED", "DECLINED", "CANCELED"] } } } },
-    orderBy: { createdAt: "desc" },
-  });
+  const items = await listInventoryWithCatalog({ ownerId: user.id });
+
+  // Count active rentals per copy (not completed/declined/canceled).
+  const activeByItem = new Map<string, number>();
+  if (items.length > 0) {
+    const { data } = await supabaseAdmin()
+      .from("Rental")
+      .select("inventoryItemId, status")
+      .in("inventoryItemId", items.map((i) => i.id));
+    for (const r of (data as { inventoryItemId: string; status: string }[] | null) ?? []) {
+      if (["COMPLETED", "DECLINED", "CANCELED"].includes(r.status)) continue;
+      activeByItem.set(r.inventoryItemId, (activeByItem.get(r.inventoryItemId) ?? 0) + 1);
+    }
+  }
 
   return (
     <div className="grid gap-8 lg:grid-cols-[1fr_360px]">
@@ -24,19 +34,22 @@ export default async function MyListingsPage() {
           </p>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2">
-            {items.map((item) => (
-              <div key={item.id} className="space-y-1">
-                <PuzzleCard item={item} />
-                <div className="flex items-center gap-2 px-1">
-                  <Badge tone={item.status === "AVAILABLE" ? "green" : "amber"}>
-                    {item.status}
-                  </Badge>
-                  {item.rentals.length > 0 ? (
-                    <Badge tone="indigo">{item.rentals.length} active rental</Badge>
-                  ) : null}
+            {items.map((item) => {
+              const active = activeByItem.get(item.id) ?? 0;
+              return (
+                <div key={item.id} className="space-y-1">
+                  <PuzzleCard item={item} />
+                  <div className="flex items-center gap-2 px-1">
+                    <Badge tone={item.status === "AVAILABLE" ? "green" : "amber"}>
+                      {item.status}
+                    </Badge>
+                    {active > 0 ? (
+                      <Badge tone="indigo">{active} active rental</Badge>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

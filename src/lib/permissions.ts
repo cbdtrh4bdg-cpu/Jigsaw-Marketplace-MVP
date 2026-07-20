@@ -1,6 +1,6 @@
-import { Role } from "@prisma/client";
+import { Role, type SubscriptionRow, type SubscriptionPlanRow } from "@/lib/db-types";
 import { auth } from "@/lib/auth";
-import { prisma } from "@/lib/db";
+import { supabaseAdmin } from "@/lib/supabase";
 
 export class AuthError extends Error {
   constructor(
@@ -39,22 +39,37 @@ export async function requireAdmin(): Promise<CurrentUser> {
   return user;
 }
 
+async function fetchSubscription(userId: string): Promise<SubscriptionRow | null> {
+  const { data, error } = await supabaseAdmin()
+    .from("Subscription")
+    .select("*")
+    .eq("userId", userId)
+    .maybeSingle();
+  if (error) throw new Error(`Supabase error: ${error.message}`);
+  return (data as SubscriptionRow | null) ?? null;
+}
+
+function isActive(sub: SubscriptionRow | null): boolean {
+  return Boolean(sub?.active && new Date(sub.currentPeriodEnd) >= new Date());
+}
+
 /**
  * Require an active subscription — the gate for browsing and borrowing.
- * Returns the subscription so callers can inspect credits.
+ * Returns the subscription (with plan) so callers can inspect credits.
  */
 export async function requireSubscription(userId: string) {
-  const sub = await prisma.subscription.findUnique({
-    where: { userId },
-    include: { plan: true },
-  });
-  if (!sub || !sub.active || sub.currentPeriodEnd < new Date()) {
+  const sub = await fetchSubscription(userId);
+  if (!isActive(sub)) {
     throw new AuthError("An active subscription is required", 402);
   }
-  return sub;
+  const { data: plan } = await supabaseAdmin()
+    .from("SubscriptionPlan")
+    .select("*")
+    .eq("id", sub!.planId)
+    .maybeSingle();
+  return { ...sub!, plan: plan as SubscriptionPlanRow | null };
 }
 
 export async function hasActiveSubscription(userId: string): Promise<boolean> {
-  const sub = await prisma.subscription.findUnique({ where: { userId } });
-  return Boolean(sub?.active && sub.currentPeriodEnd >= new Date());
+  return isActive(await fetchSubscription(userId));
 }

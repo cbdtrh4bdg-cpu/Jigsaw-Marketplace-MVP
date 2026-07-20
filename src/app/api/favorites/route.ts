@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { handle } from "@/lib/api";
 import { requireUser } from "@/lib/permissions";
-import { prisma } from "@/lib/db";
+import { supabaseAdmin } from "@/lib/supabase";
 
 const bodySchema = z.object({ catalogItemId: z.string().min(1) });
 
@@ -10,15 +10,27 @@ const bodySchema = z.object({ catalogItemId: z.string().min(1) });
 export const POST = handle(async (req: NextRequest) => {
   const user = await requireUser();
   const { catalogItemId } = bodySchema.parse(await req.json());
+  const db = supabaseAdmin();
 
-  const existing = await prisma.favorite.findUnique({
-    where: { userId_catalogItemId: { userId: user.id, catalogItemId } },
-  });
+  const { data: existing } = await db
+    .from("Favorite")
+    .select("id")
+    .eq("userId", user.id)
+    .eq("catalogItemId", catalogItemId)
+    .maybeSingle();
 
   if (existing) {
-    await prisma.favorite.delete({ where: { id: existing.id } });
+    const { error } = await db
+      .from("Favorite")
+      .delete()
+      .eq("id", (existing as { id: string }).id);
+    if (error) throw new Error(`Favorite delete failed: ${error.message}`);
     return NextResponse.json({ favorited: false });
   }
-  await prisma.favorite.create({ data: { userId: user.id, catalogItemId } });
+
+  const { error } = await db
+    .from("Favorite")
+    .insert({ userId: user.id, catalogItemId });
+  if (error) throw new Error(`Favorite insert failed: ${error.message}`);
   return NextResponse.json({ favorited: true });
 });

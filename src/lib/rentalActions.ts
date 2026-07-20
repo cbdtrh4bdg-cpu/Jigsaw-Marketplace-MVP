@@ -3,7 +3,7 @@ import { handle } from "@/lib/api";
 import { requireUser } from "@/lib/permissions";
 
 type RouteCtx = { params: Promise<{ id: string }> };
-type Actor = { id: string; role: import("@prisma/client").Role };
+type Actor = { id: string; role: import("@/lib/db-types").Role };
 
 /**
  * Build a POST handler for a simple rental transition that only needs the

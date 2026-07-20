@@ -1,8 +1,8 @@
 import Link from "next/link";
-import { prisma } from "@/lib/db";
 import { hasActiveSubscription } from "@/lib/permissions";
 import { requireUserPage } from "@/lib/pageAuth";
-import { InventoryStatus } from "@prisma/client";
+import { InventoryStatus } from "@/lib/db-types";
+import { listInventoryWithCatalog } from "@/lib/data";
 import { PuzzleCard } from "@/components/PuzzleCard";
 import { Card } from "@/components/ui";
 
@@ -29,12 +29,9 @@ export default async function BrowsePage() {
     );
   }
 
-  const items = await prisma.inventoryItem.findMany({
-    where: { status: InventoryStatus.AVAILABLE },
-    include: { catalogItem: true, owner: { select: { name: true } } },
-    orderBy: { createdAt: "desc" },
+  const items = await listInventoryWithCatalog({
+    status: InventoryStatus.AVAILABLE,
   });
-
   const borrowable = items.filter((i) => i.ownerId !== user.id);
 
   return (

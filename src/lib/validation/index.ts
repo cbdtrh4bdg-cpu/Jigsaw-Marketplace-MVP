@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Category } from "@prisma/client";
+import { Category } from "@/lib/db-types";
 import { RENTAL_PERIOD_DAYS } from "@/lib/config";
 import { getCategoryModule } from "@/lib/categories";
 

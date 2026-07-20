@@ -1,4 +1,4 @@
-import type { DepositStatus, RentalStatus } from "@prisma/client";
+import type { DepositStatus, RentalStatus } from "@/lib/db-types";
 
 // A trimmed, serializable view of a rental for the management UI.
 export interface RentalView {

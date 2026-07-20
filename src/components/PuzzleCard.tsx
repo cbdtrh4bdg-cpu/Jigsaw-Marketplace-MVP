@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Badge, Card } from "@/components/ui";
 import { formatCents } from "@/lib/money";
 import { getCategoryModule } from "@/lib/categories";
-import { Category, InventorySource } from "@prisma/client";
+import { Category, InventorySource } from "@/lib/db-types";
 
 export interface PuzzleCardData {
   id: string;

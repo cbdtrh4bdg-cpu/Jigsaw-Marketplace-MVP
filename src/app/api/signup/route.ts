@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
+import { supabaseAdmin } from "@/lib/supabase";
 import { hashPassword } from "@/lib/auth";
 import { handle } from "@/lib/api";
 import { signupSchema } from "@/lib/validation";
@@ -7,8 +7,13 @@ import { signupSchema } from "@/lib/validation";
 export const POST = handle(async (req: NextRequest) => {
   const body = signupSchema.parse(await req.json());
   const email = body.email.toLowerCase();
+  const db = supabaseAdmin();
 
-  const existing = await prisma.user.findUnique({ where: { email } });
+  const { data: existing } = await db
+    .from("User")
+    .select("id")
+    .eq("email", email)
+    .maybeSingle();
   if (existing) {
     return NextResponse.json(
       { error: "An account with that email already exists" },
@@ -16,14 +21,16 @@ export const POST = handle(async (req: NextRequest) => {
     );
   }
 
-  const user = await prisma.user.create({
-    data: {
+  const { data, error } = await db
+    .from("User")
+    .insert({
       email,
       name: body.name,
       passwordHash: await hashPassword(body.password),
-    },
-    select: { id: true, email: true, name: true },
-  });
+    })
+    .select("id, email, name")
+    .single();
+  if (error) throw new Error(`Signup failed: ${error.message}`);
 
-  return NextResponse.json({ user }, { status: 201 });
+  return NextResponse.json({ user: data }, { status: 201 });
 });

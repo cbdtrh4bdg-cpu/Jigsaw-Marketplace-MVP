@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Category, RentalStatus } from "@prisma/client";
+import { Category, RentalStatus } from "@/lib/db-types";
 import { getCategoryModule } from "@/lib/categories";
 import { Badge, Button, Card, Field, Input, Select, Textarea } from "@/components/ui";
 import { formatCents } from "@/lib/money";
