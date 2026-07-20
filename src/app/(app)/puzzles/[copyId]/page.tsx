@@ -8,6 +8,8 @@ import { Badge, Card } from "@/components/ui";
 import { formatCents } from "@/lib/money";
 import { RequestRentalForm } from "@/components/RequestRentalForm";
 import { FavoriteButton } from "@/components/FavoriteButton";
+import { ReviewForm } from "@/components/ReviewForm";
+import { RentalStatus } from "@prisma/client";
 import { getTitleSignals } from "@/lib/services/revenueShareResolver";
 import { titlePopularity } from "@/lib/services/revenueShare";
 
@@ -32,18 +34,35 @@ export default async function PuzzleDetailPage({
 
   const mod = getCategoryModule(item.catalogItem.category);
   const attrs = mod.attributeSchema.safeParse(item.catalogItem.attributes);
-  const [favorited, subscribed, signals] = await Promise.all([
-    prisma.favorite.findUnique({
-      where: {
-        userId_catalogItemId: {
-          userId: user.id,
-          catalogItemId: item.catalogItemId,
+  const [favorited, subscribed, signals, completedCount, myReview] =
+    await Promise.all([
+      prisma.favorite.findUnique({
+        where: {
+          userId_catalogItemId: {
+            userId: user.id,
+            catalogItemId: item.catalogItemId,
+          },
         },
-      },
-    }),
-    hasActiveSubscription(user.id),
-    getTitleSignals(prisma, item.catalogItemId),
-  ]);
+      }),
+      hasActiveSubscription(user.id),
+      getTitleSignals(prisma, item.catalogItemId),
+      prisma.rental.count({
+        where: {
+          borrowerId: user.id,
+          status: RentalStatus.COMPLETED,
+          inventoryItem: { catalogItemId: item.catalogItemId },
+        },
+      }),
+      prisma.review.findUnique({
+        where: {
+          userId_catalogItemId: {
+            userId: user.id,
+            catalogItemId: item.catalogItemId,
+          },
+        },
+      }),
+    ]);
+  const canReview = completedCount > 0;
   const popularity = Math.round(titlePopularity(signals));
 
   const isOwn = item.ownerId === user.id;
@@ -107,6 +126,15 @@ export default async function PuzzleDetailPage({
 
         <section className="mt-8">
           <h2 className="mb-3 text-lg font-semibold">Reviews</h2>
+          {canReview ? (
+            <div className="mb-4">
+              <ReviewForm
+                catalogItemId={item.catalogItemId}
+                initialRating={myReview?.rating}
+                initialComment={myReview?.comment ?? undefined}
+              />
+            </div>
+          ) : null}
           {item.catalogItem.reviews.length === 0 ? (
             <p className="text-sm text-slate-500">No reviews yet.</p>
           ) : (
