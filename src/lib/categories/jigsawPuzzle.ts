@@ -23,6 +23,21 @@ export const jigsawPuzzleModule: CategoryModule<JigsawAttributes> = {
     return 400;
   },
   defaultDepositCents: (a) => (a.pieceCount >= 2000 ? 3000 : 2000),
+  formFields: [
+    { key: "pieceCount", label: "Piece count", type: "number", required: true },
+    {
+      key: "difficulty",
+      label: "Difficulty",
+      type: "select",
+      options: [
+        { label: "—", value: "" },
+        { label: "Easy", value: "easy" },
+        { label: "Medium", value: "medium" },
+        { label: "Hard", value: "hard" },
+        { label: "Expert", value: "expert" },
+      ],
+    },
+  ],
   browseFilters: [
     {
       key: "pieceCount",

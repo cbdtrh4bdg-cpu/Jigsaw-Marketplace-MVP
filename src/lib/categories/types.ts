@@ -20,6 +20,16 @@ export interface SurveyField {
   help?: string;
 }
 
+// Descriptor for one attribute input in the listing form. Lets the UI render a
+// category's attribute fields without hard-coding them.
+export interface FormField {
+  key: string;
+  label: string;
+  type: "number" | "text" | "select";
+  required?: boolean;
+  options?: { label: string; value: string }[];
+}
+
 export interface CategoryModule<TAttributes = Record<string, unknown>> {
   category: Category;
   label: string; // human singular, e.g. "Jigsaw Puzzle"
@@ -31,6 +41,8 @@ export interface CategoryModule<TAttributes = Record<string, unknown>> {
   // Sensible default owner rate (cents/week) derived from attributes.
   defaultRatePerWeekCents: (attrs: TAttributes) => number;
   defaultDepositCents: (attrs: TAttributes) => number;
+  // Attribute inputs surfaced in the listing form.
+  formFields: FormField[];
   // Browse filters surfaced in the UI.
   browseFilters: BrowseFilter[];
   // Return-time condition-proof prompt (category-aware).
