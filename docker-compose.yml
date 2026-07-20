@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16
+    container_name: jigsaw_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jigsaw
+      POSTGRES_PASSWORD: jigsaw
+      POSTGRES_DB: jigsaw
+    ports:
+      - "5432:5432"
+    volumes:
+      - jigsaw_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jigsaw -d jigsaw"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  jigsaw_pgdata:
