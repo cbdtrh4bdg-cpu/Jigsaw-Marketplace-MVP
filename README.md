@@ -128,9 +128,13 @@ supabase/
   `RevenueShareEntry` at completion (`src/lib/services/revenueShare.ts`).
 - **Refundable deposit + photo proof** — the borrower uploads a photo of the
   assembled puzzle before teardown; the return is gated on it (enforced both in
-  the service and in the `return_ship` RPC).
+  the service and in the `return_ship` RPC). Photos are stored in **Supabase
+  Storage** (`STORAGE_PROVIDER=supabase`, bucket `SUPABASE_STORAGE_BUCKET`,
+  auto-created public on first upload); a local-disk `simulated` provider is
+  available for offline dev.
 - **Swappable services** — payments, shipping, and storage sit behind
-  interfaces with `Simulated*` implementations selected by env var.
+  interfaces selected by env var (`Simulated*` impls, plus a Supabase Storage
+  impl for uploads).
 
 ## Extensibility
 
