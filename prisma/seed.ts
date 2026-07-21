@@ -114,12 +114,36 @@ async function main() {
   });
 
   await upsertPlan({ name: "Starter", monthlyPriceCents: 700, monthlyCredits: 0 });
-  await upsertPlan({ name: "Plus", monthlyPriceCents: 1400, monthlyCredits: 1 });
+  const plusPlan = await upsertPlan({
+    name: "Plus",
+    monthlyPriceCents: 1400,
+    monthlyCredits: 1,
+  });
   await upsertPlan({
     name: "Pro",
     monthlyPriceCents: 2400,
     monthlyCredits: 3,
     earlyAccess: true,
+  });
+
+  // Bob gets an active Plus subscription so the borrow flow is demoable.
+  const periodEnd = new Date();
+  periodEnd.setMonth(periodEnd.getMonth() + 1);
+  await prisma.subscription.upsert({
+    where: { userId: bob.id },
+    update: {
+      planId: plusPlan.id,
+      status: "ACTIVE",
+      currentPeriodEnd: periodEnd,
+      creditsRemaining: plusPlan.monthlyCredits,
+    },
+    create: {
+      userId: bob.id,
+      planId: plusPlan.id,
+      status: "ACTIVE",
+      currentPeriodEnd: periodEnd,
+      creditsRemaining: plusPlan.monthlyCredits,
+    },
   });
 
   // Alice lists a few puzzles (P2P).

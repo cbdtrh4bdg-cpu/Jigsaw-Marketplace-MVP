@@ -31,11 +31,17 @@ export async function getApiUser(): Promise<SessionUser | null> {
 
 /**
  * Active-subscription gate. Returns the subscription or null.
- * (Plans/subscriptions arrive in Phase 2; browse/borrow enforce this then.)
  */
 export async function getActiveSubscription(userId: string) {
   const sub = await prisma.subscription.findUnique({ where: { userId } });
   if (!sub || sub.status !== "ACTIVE") return null;
   if (sub.currentPeriodEnd < new Date()) return null;
+  return sub;
+}
+
+/** For pages: requires an active subscription or redirects to /subscribe. */
+export async function requireSubscription(userId: string) {
+  const sub = await getActiveSubscription(userId);
+  if (!sub) redirect("/subscribe");
   return sub;
 }

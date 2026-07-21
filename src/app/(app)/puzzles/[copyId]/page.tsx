@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { getCategoryModule } from "@/lib/categories";
 import { formatCents, titleCase } from "@/lib/format";
+import { requireSession, getActiveSubscription } from "@/lib/permissions";
+import { BorrowWidget } from "@/components/borrow-widget";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +13,7 @@ export default async function PuzzleDetailPage({
 }: {
   params: { copyId: string };
 }) {
+  const user = await requireSession();
   const item = await prisma.inventoryItem.findUnique({
     where: { id: params.copyId },
     include: {
@@ -19,6 +22,15 @@ export default async function PuzzleDetailPage({
     },
   });
   if (!item) notFound();
+
+  const sub = await getActiveSubscription(user.id);
+  const isOwnListing = item.ownerId === user.id;
+  const isAvailable = item.status === "AVAILABLE";
+  let blockedReason: string | undefined;
+  if (isOwnListing) blockedReason = "This is your own listing.";
+  else if (!isAvailable) blockedReason = "This item is currently on loan.";
+  else if (!sub) blockedReason = "subscription";
+  const canBorrow = !blockedReason;
 
   const mod = getCategoryModule(item.catalogItem.category);
   const summary = mod.summarizeAttributes(
@@ -95,8 +107,15 @@ export default async function PuzzleDetailPage({
             )}
           </dl>
 
-          <div className="mt-6 rounded-lg border border-dashed border-slate-300 bg-white p-4 text-center text-sm text-slate-400">
-            Borrowing opens in the next phase.
+          <div className="mt-6">
+            <BorrowWidget
+              inventoryItemId={item.id}
+              ratePerWeekCents={item.ratePerWeekCents}
+              depositCents={item.depositCents}
+              canBorrow={canBorrow}
+              blockedReason={blockedReason}
+              creditsAvailable={sub?.creditsRemaining ?? 0}
+            />
           </div>
         </div>
       </div>
