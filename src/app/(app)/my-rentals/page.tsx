@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/permissions";
 import { formatCents } from "@/lib/format";
 import { RentalStatusBadge } from "@/components/rental-status-badge";
 import { RentalActionButton } from "@/components/rental-actions";
+import { ReviewForm } from "@/components/review-form";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +12,10 @@ export default async function MyRentalsPage() {
   const user = await requireSession();
   const rentals = await prisma.rental.findMany({
     where: { borrowerId: user.id },
-    include: { inventoryItem: { include: { catalogItem: true } } },
+    include: {
+      inventoryItem: { include: { catalogItem: true } },
+      reviews: true,
+    },
     orderBy: { requestedAt: "desc" },
   });
 
@@ -87,6 +91,12 @@ export default async function MyRentalsPage() {
                           Complete &amp; return
                         </Link>
                       )}
+                      {r.status === "COMPLETED" &&
+                        (r.reviews.some((rev) => rev.raterId === user.id) ? (
+                          <span className="text-xs text-slate-400">Reviewed</span>
+                        ) : (
+                          <ReviewForm rentalId={r.id} />
+                        ))}
                     </div>
                   </td>
                 </tr>

@@ -5,6 +5,7 @@ import { getCategoryModule } from "@/lib/categories";
 import { formatCents, titleCase } from "@/lib/format";
 import { requireSession, getActiveSubscription } from "@/lib/permissions";
 import { BorrowWidget } from "@/components/borrow-widget";
+import { FavoriteButton } from "@/components/favorite-button";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +24,18 @@ export default async function PuzzleDetailPage({
   });
   if (!item) notFound();
 
-  const sub = await getActiveSubscription(user.id);
+  const [sub, favCount, myFav] = await Promise.all([
+    getActiveSubscription(user.id),
+    prisma.favorite.count({ where: { catalogItemId: item.catalogItemId } }),
+    prisma.favorite.findUnique({
+      where: {
+        userId_catalogItemId: {
+          userId: user.id,
+          catalogItemId: item.catalogItemId,
+        },
+      },
+    }),
+  ]);
   const isOwnListing = item.ownerId === user.id;
   const isAvailable = item.status === "AVAILABLE";
   let blockedReason: string | undefined;
@@ -81,6 +93,14 @@ export default async function PuzzleDetailPage({
             {item.catalogItem.brand ? `${item.catalogItem.brand} · ` : ""}
             {summary} · {mod.label}
           </p>
+
+          <div className="mt-3">
+            <FavoriteButton
+              catalogItemId={item.catalogItemId}
+              initialFavorited={Boolean(myFav)}
+              initialCount={favCount}
+            />
+          </div>
 
           <dl className="mt-6 space-y-2 text-sm">
             <div className="flex justify-between border-b border-slate-100 py-1.5">

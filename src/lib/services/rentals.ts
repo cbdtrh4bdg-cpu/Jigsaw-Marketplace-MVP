@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { getPaymentProvider } from "@/lib/services/payments";
 import { quoteRentalFeeCents, isAllowedPeriod } from "@/lib/services/pricing";
 import { getShippingProvider, resolveShippingPayer } from "@/lib/services/shipping";
+import { settleRevenueShare } from "@/lib/services/revenueShare";
 import { getActiveSubscription } from "@/lib/permissions";
 
 export class RentalError extends Error {}
@@ -463,5 +464,79 @@ export async function settleCompletedRental(rentalId: string) {
     );
   }
 
+  // Split the rental fee between owner and platform (locked-in at completion).
+  await settleRevenueShare(rentalId);
+
   return prisma.rental.findUnique({ where: { id: rentalId } });
+}
+
+/**
+ * Admin resolves a dispute: forfeit part/all of the deposit (paid to a P2P
+ * owner, kept by the platform for warehouse copies), then complete the rental.
+ * The rental-fee revenue split still runs at completion, independent of the
+ * deposit forfeiture.
+ */
+export async function resolveDispute(params: {
+  rentalId: string;
+  adminId: string;
+  forfeitCents: number;
+  notes?: string;
+}) {
+  const rental = await prisma.rental.findUnique({
+    where: { id: params.rentalId },
+    include: { deposit: true, inventoryItem: true, dispute: true },
+  });
+  if (!rental) throw new RentalError("Rental not found");
+  assertStatus(rental.status, ["DISPUTED"]);
+  if (!rental.deposit) throw new RentalError("No deposit to settle");
+
+  const amount = rental.deposit.amountCents;
+  const forfeit = Math.max(0, Math.min(params.forfeitCents, amount));
+  const refund = amount - forfeit;
+  const depositStatus =
+    forfeit === 0 ? "REFUNDED" : forfeit === amount ? "FORFEITED" : "PARTIALLY_FORFEITED";
+
+  await prisma.$transaction(async (tx) => {
+    await tx.deposit.update({
+      where: { id: rental.deposit!.id },
+      data: { status: depositStatus, refundedCents: refund, forfeitedCents: forfeit },
+    });
+    await tx.dispute.update({
+      where: { rentalId: rental.id },
+      data: {
+        status: "RESOLVED",
+        resolvedByAdminId: params.adminId,
+        resolutionNotes: params.notes,
+        resolvedAt: new Date(),
+      },
+    });
+    await tx.inventoryItem.update({
+      where: { id: rental.inventoryItemId },
+      data: { status: "AVAILABLE" },
+    });
+    await tx.rental.update({
+      where: { id: rental.id },
+      data: { status: "COMPLETED", completedAt: new Date() },
+    });
+  });
+
+  // Move deposit money: refund to borrower, forfeit to owner (P2P) / platform.
+  await getPaymentProvider().releaseDeposit(
+    rental.borrowerId,
+    rental.id,
+    refund,
+    forfeit,
+  );
+  if (forfeit > 0 && rental.inventoryItem.ownerId) {
+    await getPaymentProvider().payoutOwner(
+      rental.inventoryItem.ownerId,
+      rental.id,
+      forfeit,
+    );
+  }
+
+  // Rental-fee split still applies.
+  await settleRevenueShare(rental.id);
+
+  return prisma.rental.findUnique({ where: { id: rental.id } });
 }
