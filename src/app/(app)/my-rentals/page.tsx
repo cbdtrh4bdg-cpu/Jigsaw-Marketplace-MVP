@@ -71,10 +71,23 @@ export default async function MyRentalsPage() {
                   <td className="px-4 py-3 text-slate-600">
                     {r.dueAt ? r.dueAt.toLocaleDateString() : "—"}
                   </td>
-                  <td className="px-4 py-3 text-right">
-                    {r.status === "REQUESTED" && (
-                      <RentalActionButton rentalId={r.id} action="cancel" />
-                    )}
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {r.status === "REQUESTED" && (
+                        <RentalActionButton rentalId={r.id} action="cancel" />
+                      )}
+                      {r.status === "SHIPPED_TO_BORROWER" && (
+                        <RentalActionButton rentalId={r.id} action="receive" />
+                      )}
+                      {r.status === "IN_HAND" && (
+                        <Link
+                          href={`/my-rentals/${r.id}/return`}
+                          className="whitespace-nowrap rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-brand-700"
+                        >
+                          Complete &amp; return
+                        </Link>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

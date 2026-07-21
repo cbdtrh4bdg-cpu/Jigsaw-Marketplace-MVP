@@ -64,12 +64,26 @@ export default async function MyLoansPage() {
                     <RentalStatusBadge status={r.status} />
                   </td>
                   <td className="px-4 py-3">
-                    {r.status === "REQUESTED" && (
-                      <div className="flex justify-end gap-2">
-                        <RentalActionButton rentalId={r.id} action="approve" />
-                        <RentalActionButton rentalId={r.id} action="decline" />
-                      </div>
-                    )}
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {r.status === "REQUESTED" && (
+                        <>
+                          <RentalActionButton rentalId={r.id} action="approve" />
+                          <RentalActionButton rentalId={r.id} action="decline" />
+                        </>
+                      )}
+                      {r.status === "APPROVED" && (
+                        <RentalActionButton rentalId={r.id} action="ship" />
+                      )}
+                      {r.status === "RETURN_SHIPPED" && (
+                        <RentalActionButton rentalId={r.id} action="markReturned" />
+                      )}
+                      {r.status === "RETURNED" && (
+                        <>
+                          <RentalActionButton rentalId={r.id} action="inspectComplete" />
+                          <RentalActionButton rentalId={r.id} action="inspectDispute" />
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
